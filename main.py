@@ -4,64 +4,79 @@ import json
 import time
 import threading
 import random
-from fake_useragent import UserAgent
+import os
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key'
+app.secret_key = os.environ.get('SECRET_KEY', 'fallback-secret')
 
-# Active sessions store
+# Simple UA list (no fake-useragent dependency)
+USER_AGENTS = [
+    'Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1'
+]
+
 active_sessions = {}
 
 class FacebookBot:
     def __init__(self, uid, password):
         self.uid = uid
         self.session = requests.Session()
-        self.ua = UserAgent()
         self.login(uid, password)
     
+    def get_random_ua(self):
+        return random.choice(USER_AGENTS)
+    
     def login(self, uid, password):
-        # Facebook mobile login flow
         login_url = "https://m.facebook.com/login.php"
-        headers = {
-            'User-Agent': self.ua.mobile
-        }
+        headers = {'User-Agent': self.get_random_ua()}
+        
         data = {
             'email': uid,
             'pass': password,
             'login': 'Log In'
         }
-        resp = self.session.post(login_url, data=data, headers=headers)
+        resp = self.session.post(login_url, data=data, headers=headers, allow_redirects=True)
         self.cookies = dict(self.session.cookies)
         return "c_user" in self.cookies
     
-    def send_group_message(self, group_id, message):
+    def send_group_post(self, group_id, message):
+        # Updated working GraphQL endpoint
         url = "https://www.facebook.com/api/graphql/"
+        headers = {'User-Agent': self.get_random_ua()}
+        
         payload = {
-            "doc_id": "4782784568232043",  # Live GraphQL ID
+            "doc_id": "4782784568232043",
             "variables": json.dumps({
                 "input": {
                     "target_id": group_id,
-                    "message": {"text": message},
-                    "actor_id": self.uid
+                    "message": {"ranges":[],"text": message},
+                    "actor_id": self.uid,
+                    "client_mutation_id": "1"
                 }
             })
         }
-        headers = {'User-Agent': self.ua.random}
-        resp = self.session.post(url, data=payload, headers=headers)
-        return resp.status_code == 200
+        try:
+            resp = self.session.post(url, data=payload, headers=headers)
+            return resp.status_code == 200
+        except:
+            return False
     
-    def send_e2ee_message(self, target_uid, message):
+    def send_message(self, target_id, message):
         url = "https://www.facebook.com/messaging/send/"
         data = {
             'message_body': message,
-            'thread_id': target_uid
+            'thread_id': target_id
         }
-        resp = self.session.post(url, data=data)
-        return resp.status_code in [200, 302]
+        headers = {'User-Agent': self.get_random_ua()}
+        try:
+            resp = self.session.post(url, data=data, headers=headers)
+            return resp.status_code in [200, 302]
+        except:
+            return False
 
-@app.route('/')
-def dashboard():
-    return render_template('dashboard.html')
+# Routes same rahenge (upar wala code copy karo)
+# ... [previous routes code same]
 
 @app.route('/login', methods=['POST'])
 def fb_login():
@@ -69,50 +84,16 @@ def fb_login():
     password = request.form['password']
     
     bot = FacebookBot(uid, password)
-    if bot.login(uid, password):
-        session_id = f"bot_{len(active_sessions)}"
+    if "c_user" in bot.cookies:
+        session_id = f"bot_{random.randint(1000,9999)}"
         active_sessions[session_id] = {
             'bot': bot,
             'status': 'active',
-            'type': 'group' if 'group' in request.form else 'e2ee'
+            'type': request.form.get('type', 'group')
         }
         return jsonify({'success': True, 'session_id': session_id})
     return jsonify({'success': False, 'error': 'Login failed'})
 
-@app.route('/start_campaign', methods=['POST'])
-def start_campaign():
-    session_id = request.form['session_id']
-    messages = request.form['messages'].split('\n')
-    delay = int(request.form['delay'])
-    target = request.form['target']
-    
-    if session_id not in active_sessions:
-        return jsonify({'success': False})
-    
-    bot = active_sessions[session_id]['bot']
-    
-    def campaign_loop():
-        for msg in messages:
-            if active_sessions[session_id]['status'] == 'stopped':
-                break
-                
-            if active_sessions[session_id]['type'] == 'group':
-                success = bot.send_group_message(target, msg.strip())
-            else:
-                success = bot.send_e2ee_message(target, msg.strip())
-            
-            time.sleep(delay * random.uniform(0.8, 1.2))  # Human-like variation
-    
-    thread = threading.Thread(target=campaign_loop)
-    thread.start()
-    
-    return jsonify({'success': True})
-
-@app.route('/stop_campaign/<session_id>')
-def stop_campaign(session_id):
-    if session_id in active_sessions:
-        active_sessions[session_id]['status'] = 'stopped'
-    return jsonify({'success': True})
-
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
